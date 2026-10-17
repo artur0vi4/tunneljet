@@ -13,7 +13,7 @@ android {
         applicationId = "com.amurcanov.tgwsproxy"
         targetSdk = 35
         versionCode = 123
-        versionName = "1.2.3"
+        versionName = "1.2.3-fork.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

@@ -13,6 +13,8 @@
 
 **TG WS Proxy Android** — это локальный **MTProto-прокси** для Telegram на Android. Приложение помогает частично решать проблемы и в ряде сценариев ускоряет работу мессенджера, перенаправляя трафик через защищённые CloudFlare WebSocket-соединения или напрямую к датацентрам Telegram.
 
+> **Это форк.** Ветка `improved` содержит улучшения поверх оригинального [amurcanov/tg-ws-proxy-android](https://github.com/amurcanov/tg-ws-proxy-android): устойчивость к паникам (краши #288), проверку TLS-сертификатов (MITM), быстрые переподключения на мобильных сетях и экономию батареи. Полный список изменений — в [FORK.md](FORK.md).
+
 ---
 
 <img width="972" height="696" alt="MyCollages (5)" src="https://github.com/user-attachments/assets/7c9b9f2a-fc60-4aee-b93d-db950e24555c" />
