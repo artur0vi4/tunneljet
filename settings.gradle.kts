@@ -15,5 +15,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "TgWsProxy"
+rootProject.name = "Tunneljet"
 include(":app")

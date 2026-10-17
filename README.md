@@ -1,6 +1,8 @@
 <div align="center">
   
-  # Telegram WS Proxy Android
+  # Tunneljet
+<br>
+  <img src="brand/social-preview.png" width="720" alt="Tunneljet">
 <br>
   <img src="https://img.shields.io/badge/Android-SDK_24--36-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android SDK">
   <img src="https://img.shields.io/badge/Rust-1.70+-000000?style=for-the-badge&logo=rust&logoColor=white" alt="Rust Version">
@@ -11,9 +13,9 @@
 </div>
 <br>
 
-**TG WS Proxy Android** — это локальный **MTProto-прокси** для Telegram на Android. Приложение помогает частично решать проблемы и в ряде сценариев ускоряет работу мессенджера, перенаправляя трафик через защищённые CloudFlare WebSocket-соединения или напрямую к датацентрам Telegram.
+**Tunneljet** (форк **TG WS Proxy Android**) — это локальный **MTProto-прокси** для Telegram на Android. Приложение помогает частично решать проблемы и в ряде сценариев ускоряет работу мессенджера, перенаправляя трафик через защищённые CloudFlare WebSocket-соединения или напрямую к датацентрам Telegram.
 
-> **Это форк.** Ветка `improved` содержит улучшения поверх оригинального [amurcanov/tg-ws-proxy-android](https://github.com/amurcanov/tg-ws-proxy-android): устойчивость к паникам (краши #288), проверку TLS-сертификатов (MITM), быстрые переподключения на мобильных сетях и экономию батареи. Полный список изменений — в [FORK.md](FORK.md).
+> **Это форк.** Ветка `improved` содержит улучшения поверх оригинального [amurcanov/tg-ws-proxy-android](https://github.com/amurcanov/tg-ws-proxy-android): устойчивость к паникам (краши #288), проверку TLS-сертификатов (MITM), быстрые переподключения на мобильных сетях и экономию батареи. Форк переименован в **Tunneljet**, получил собственную иконку и `applicationId` — ставится параллельно с оригиналом. Полный список изменений — в [FORK.md](FORK.md).
 
 ---
 
@@ -34,7 +36,7 @@
 ## Как это работает
 
 ```text
-Telegram Android → Локальный MTProto (по умолчанию 127.0.0.1:1443) → TG WS Proxy → WSS (через CloudFlare или напрямую) → Telegram DC
+Telegram Android → Локальный MTProto (по умолчанию 127.0.0.1:1443) → Tunneljet → WSS (через CloudFlare или напрямую) → Telegram DC
 ```
 
 1. Приложение поднимает локальный MTProto-прокси средствами нативного движка на языке **Rust**.
@@ -46,7 +48,7 @@ Telegram Android → Локальный MTProto (по умолчанию 127.0.0
 
 1. Скачайте актуальный `APK` со **[страницы релизов](https://github.com/amurcanov/tg-ws-proxy-android/releases)**.
 2. Установите приложение на ваш Android-смартфон.
-3. Откройте **TG WS Proxy Android**.
+3. Откройте **Tunneljet**.
 4. Ознакомьтесь со справкой внутри приложения.
 5. Нажмите **«Запустить прокси»** — появится уведомление о работе в фоновом режиме.
 6. Нажмите **«Применить в Telegram»** — откроется Telegram-клиент, где останется только подтвердить подключение.
@@ -78,6 +80,10 @@ Telegram Android → Локальный MTProto (по умолчанию 127.0.0
 > Если у вас возникла проблема, сбой или вопрос, пожалуйста, нажмите кнопку **«Собрать отчёт»** внутри приложения и приложите полученные данные к вашему `issue`. Мелкие ошибки в логах при нормально работающем прокси можно игнорировать.
 
 ---
+
+## Брендинг
+
+Имя, логотип (туннель + бумажный самолётик), иконки лончера/QS/уведомлений и social-preview — собственные элементы форка. Геометрия задана кодом: `brand/tunneljet_brand.py` единожды генерирует и Android-векторы (`res/drawable`, `res/mipmap-*`), и PNG-превью.
 
 ## Лицензия
 

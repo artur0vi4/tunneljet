@@ -603,7 +603,7 @@ private fun InfoHeroCard(onSupportClick: () -> Unit) {
 
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "Telegram WS Proxy",
+                        text = stringResource(R.string.app_name),
                         style = MaterialTheme.typography.headlineSmall.copy(
                             fontWeight = FontWeight.Black,
                             fontSize = 30.sp,

@@ -10,10 +10,10 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.amurcanov.tgwsproxy"
+        applicationId = "app.tunneljet"
         targetSdk = 35
-        versionCode = 123
-        versionName = "1.2.3-fork.1"
+        versionCode = 124
+        versionName = "1.2.3-fork.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

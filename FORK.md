@@ -56,12 +56,24 @@
 
 **Файлы:** `src/lib.rs`, `app/src/main/java/com/amurcanov/tgwsproxy/NativeProxy.kt`, `app/src/main/java/com/amurcanov/tgwsproxy/ProxyService.kt`.
 
+## 5. Ребрендинг: имя Tunneljet и собственная иконка
+
+Форк получил собственное имя и айдентику, чтобы отличаться от оригинала и не конфликтовать с ним при установке:
+
+- **Имя приложения:** `Telegram WS Proxy` → `Tunneljet` (`strings.xml` en/ru). Заголовок уведомления больше не захардкожен — берётся из ресурса `app_name` (`ProxyService.kt`).
+- **applicationId:** `com.amurcanov.tgwsproxy` → `app.tunneljet` — форк устанавливается параллельно с оригиналом как отдельное приложение. Java-пакет `com.amurcanov.tgwsproxy` и имя нативной библиотеки `libtgwsproxy.so` сознательно не менялись: JNA-загрузка и парсинг логов по тегу `TgWsProxy` остаются совместимыми с ядром.
+- **Тема и Gradle:** `Theme.TGWSPROXY` → `Theme.Tunneljet`; `rootProject.name` → `Tunneljet` (имя артефакта сборки).
+- **Иконки:** новый набор векторов — туннель + бумажный самолётик: `ic_launcher_fg` (кольца и самолёт с градиентами), `ic_launcher_bg` (радиальный тёмно-синий фон), новый `ic_launcher_mono` (слой `<monochrome>` — themed icons Android 13+), `ic_qs_proxy_t` и `ic_notification` (белый глиф в кольце).
+- **Ассеты и генератор:** `brand/` — social-preview, иконки 512px, шит превью и `brand/tunneljet_brand.py`: единая геометрия генерирует и Android-XML, и PNG-превью (запуск из `brand/` находит репозиторий сам; `TJ_OUT` — каталог превью).
+
+**Файлы:** `app/build.gradle.kts`, `settings.gradle.kts`, `app/src/main/AndroidManifest.xml`, `app/src/main/res/**` (иконки, строки, тема), `app/src/main/java/com/amurcanov/tgwsproxy/ProxyService.kt`, `README.md`, `brand/**`.
+
 ---
 
 ## Версии
 
 - Rust-крейт `tgwsproxy`: `1.0.0` → `1.1.0`
-- Приложение: `versionName` `1.2.3` → `1.2.3-fork.1` (в `versionCode` без изменений)
+- Приложение: `versionName` `1.2.3` → `1.2.3-fork.1` → `1.2.3-fork.2` (versionCode `124`), `applicationId` `com.amurcanov.tgwsproxy` → `app.tunneljet`
 
 ## Сборка
 
@@ -85,3 +97,4 @@
 | `fix(core): mobile-friendly reconnects` | п. 3 |
 | `feat(android): react to network changes, battery-friendly notifications` | п. 4 |
 | `docs(fork): describe fork changes, bump versions` | этот файл |
+| `feat(brand): rebrand as Tunneljet — new name, icon set, applicationId` | п. 5 |

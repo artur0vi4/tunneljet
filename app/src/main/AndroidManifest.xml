@@ -35,14 +35,14 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
         android:supportsRtl="true"
-        android:theme="@style/Theme.TGWSPROXY"
+        android:theme="@style/Theme.Tunneljet"
         tools:targetApi="33">
         
         <activity
             android:name="com.amurcanov.tgwsproxy.MainActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize"
-            android:theme="@style/Theme.TGWSPROXY">
+            android:theme="@style/Theme.Tunneljet">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
