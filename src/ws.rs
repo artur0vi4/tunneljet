@@ -1,13 +1,14 @@
 use crate::config::*;
 use crate::crypto::xor_mask_in_place;
-use crate::{ldebug};
+use crate::{ldebug, lwarn};
 use base64::Engine;
 use byteorder::{BigEndian, ByteOrder};
 use rand::RngCore;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
-use std::collections::HashMap;
+use parking_lot::RwLock;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -86,7 +87,9 @@ impl ServerCertVerifier for NoVerify {
 
 use once_cell::sync::Lazy;
 
-// Глобальный TLS-конфиг с session resumption cache (аналог tls.NewLRUClientSessionCache(100))
+// Инсекьюр-конфиг без проверки сертификатов (прежнее поведение, аналог
+// InsecureSkipVerify в Go-оригинале). Используется как fallback для хостов,
+// где строгая верификация не проходит (fronting, экзотические CA).
 static TLS_CONFIG: Lazy<Arc<ClientConfig>> = Lazy::new(|| {
     let mut cfg = ClientConfig::builder()
         .dangerous()
@@ -96,9 +99,54 @@ static TLS_CONFIG: Lazy<Arc<ClientConfig>> = Lazy::new(|| {
     Arc::new(cfg)
 });
 
-// Отдельный контекст для fronting (check_hostname=False в оригинале).
-// На практике оба контекста NoVerify; разделение сохранено для паритета.
-static TLS_CONFIG_FRONTING: Lazy<Arc<ClientConfig>> = Lazy::new(|| TLS_CONFIG.clone());
+// Верифицируемый конфиг: цепочка сертификатов проверяется по встроенным
+// корням Mozilla (webpki-roots) — не зависит от системного хранилища Android.
+// Уязвимость MITM (прежнее поведение с NoVerify для всех хостов) устранена.
+static TLS_CONFIG_SECURE: Lazy<Arc<ClientConfig>> = Lazy::new(|| {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let mut cfg = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    cfg.resumption = rustls::client::Resumption::in_memory_sessions(100);
+    Arc::new(cfg)
+});
+
+// Хосты, для которых верификация уже заканчивалась ошибкой: дальше работаем
+// с ними в прежнем режиме (без проверки), чтобы не ломать связность.
+// Очищается в StopProxy и при смене сети (NotifyNetworkChanged).
+static TLS_VERIFY_SKIP: Lazy<RwLock<HashSet<String>>> =
+    Lazy::new(|| RwLock::new(HashSet::new()));
+
+pub fn tls_verify_skip_all() {
+    TLS_VERIFY_SKIP.write().clear();
+}
+
+fn tls_use_secure_config(host: &str) -> bool {
+    !TLS_VERIFY_SKIP.read().contains(host)
+}
+
+fn tls_mark_verify_failed(host: &str) {
+    let mut set = TLS_VERIFY_SKIP.write();
+    if set.insert(host.to_string()) {
+        lwarn!(
+            "tls: certificate verification failed for '{}', using insecure mode for this host",
+            host
+        );
+    }
+}
+
+/// Ошибка верификации сертификата? (io::Error от tokio-rustls оборачивает
+/// rustls::Error — достаём его через downcast.)
+fn is_cert_verify_error(e: &std::io::Error) -> bool {
+    match e.get_ref() {
+        Some(inner) => inner
+            .downcast_ref::<rustls::Error>()
+            .map(|re| matches!(re, rustls::Error::InvalidCertificate(_)))
+            .unwrap_or(false),
+        None => false,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // WsHandshakeError
@@ -808,29 +856,60 @@ pub async fn ws_connect_once_full(
 
     let sni_name = sni.unwrap_or(domain);
     let use_fronting = sni.is_some();
-    let cfg = if use_fronting {
-        TLS_CONFIG_FRONTING.clone()
-    } else {
-        TLS_CONFIG.clone()
-    };
-    let connector = TlsConnector::from(cfg);
-    let sni_server = server_name(sni_name);
+    // Сертификат проверяем на то имя, под которым строится TLS SNI:
+    // при fronting это front-домен, иначе — домен WS-эндпоинта.
+    let verify_name = if use_fronting { FRONTING_SNI } else { domain };
+    let secure_tls = tls_use_secure_config(verify_name);
 
     let handshake_timeout = ws_handshake_timeout(timeout);
-    let tls_conn =
+    let tls_conn = {
+        let cfg = if secure_tls {
+            TLS_CONFIG_SECURE.clone()
+        } else {
+            TLS_CONFIG.clone()
+        };
+        let connector = TlsConnector::from(cfg);
+        let sni_server = server_name(sni_name);
         match tokio::time::timeout(handshake_timeout, connector.connect(sni_server, raw_conn)).await {
             Ok(Ok(c)) => c,
             Ok(Err(e)) => {
-                if e.kind() != std::io::ErrorKind::ConnectionReset {
-                    ldebug!(" ws tls fail {} via {}: {}", domain, dial_addr, e);
+                if is_cert_verify_error(&e) && secure_tls {
+                    // Строгая проверка не прошла: помечаем хост и делаем один
+                    // повтор с прежним (без проверки) поведением на новом TCP.
+                    tls_mark_verify_failed(verify_name);
+                    ldebug!(" ws tls verify fail {} via {}: {}", domain, dial_addr, e);
+                    let raw_conn2 = match tokio::time::timeout(timeout, TcpStream::connect(&target_addr)).await {
+                        Ok(Ok(c)) => {
+                            set_sock_opts(&c);
+                            c
+                        }
+                        Ok(Err(e2)) => return Err(WsError::Io(e2)),
+                        Err(_) => return Err(WsError::Timeout),
+                    };
+                    let connector2 = TlsConnector::from(TLS_CONFIG.clone());
+                    match tokio::time::timeout(
+                        handshake_timeout,
+                        connector2.connect(server_name(sni_name), raw_conn2),
+                    )
+                    .await
+                    {
+                        Ok(Ok(c)) => c,
+                        Ok(Err(e2)) => return Err(WsError::Io(e2)),
+                        Err(_) => return Err(WsError::Timeout),
+                    }
+                } else {
+                    if e.kind() != std::io::ErrorKind::ConnectionReset {
+                        ldebug!(" ws tls fail {} via {}: {}", domain, dial_addr, e);
+                    }
+                    return Err(WsError::Io(e));
                 }
-                return Err(WsError::Io(e));
             }
             Err(_) => {
                 ldebug!(" ws tls fail {} via {}: timeout", domain, dial_addr);
                 return Err(WsError::Timeout);
             }
-        };
+        }
+    };
 
     let (read_half, write_half) = tokio::io::split(tls_conn);
     handshake_tls(read_half, write_half, domain, path, timeout).await

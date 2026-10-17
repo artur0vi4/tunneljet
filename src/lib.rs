@@ -235,6 +235,7 @@ fn stop_proxy_impl() -> c_int {
     WS_BLACKLIST.write().clear();
     DC_FAIL_UNTIL.write().clear();
     IP_FAIL_UNTIL.write().clear();
+    crate::ws::tls_verify_skip_all();
     cfproxy::clear_cfproxy_429_cooldowns();
     proxy::set_ws_pool_fronting_first(true);
 
