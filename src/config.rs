@@ -15,9 +15,14 @@ pub const DEFAULT_SEND_BUF: usize = 256 * 1024;
 pub const DEFAULT_POOL_SZ: i32 = 4;
 
 // proxy/tg_ws_proxy.py: IP_FAIL_COOLDOWN / DC_FAIL_COOLDOWN / WS_FAIL_TIMEOUT
-pub const IP_FAIL_COOLDOWN: f64 = 3600.0;
+// Мобильная правка: IP меняется при каждом переключении Wi-Fi/LTE,
+// часовой кулдаун (3600s) слишком долгий — 15 минут достаточно.
+pub const IP_FAIL_COOLDOWN: f64 = 900.0;
 pub const DC_FAIL_COOLDOWN: f64 = 60.0;
 pub const WS_FAIL_TIMEOUT: f64 = 2.0;
+// Мобильная правка: чёрный список WS не бессрочный (было — навсегда),
+// через 5 минут снова пробуем прямое соединение.
+pub const WS_BLACKLIST_TTL: f64 = 300.0;
 // Прямой WS-коннект при отсутствии cooldown — 5.0 как в оригинале.
 pub const WS_DIRECT_TIMEOUT: f64 = 5.0;
 
@@ -42,6 +47,11 @@ pub const PROTO_PADDED_INTERMEDIATE_INT: u32 = 0xDDDDDDDD;
 pub const RESERVED_FIRST_BYTE: u8 = 0xEF;
 
 pub const BRIDGE_READ_TIMEOUT: Duration = Duration::from_secs(120);
+// Мобильная правка: мост рвётся только при ПОЛНОЙ тишине (нет данных в обе
+// стороны) дольше BRIDGE_IDLE_TEARDOWN. Раньше таймаут чтения от клиента
+// (120s) убивал простаивающие фоновые сессии Telegram (жалобы «прокси
+// отключается»/«нужен перезапуск»).
+pub const BRIDGE_IDLE_TEARDOWN: Duration = Duration::from_secs(600);
 pub const BRIDGE_PING_INTERVAL: Duration = Duration::from_secs(30);
 pub const WS_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 pub const WS_CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
@@ -219,7 +229,9 @@ impl DcKey {
 
 // Global state — proxy/tg_ws_proxy.py: ws_blacklist / dc_fail_until / ip_fail_until
 pub static DC_OPT: Lazy<RwLock<HashMap<i32, String>>> = Lazy::new(|| RwLock::new(HashMap::new()));
-pub static WS_BLACKLIST: Lazy<RwLock<HashMap<DcKey, bool>>> =
+// Значение — время истечения (now_monotonic() + WS_BLACKLIST_TTL), а не bool:
+// бессрочный чёрный список на мобильных сетях устаревает мгновенно.
+pub static WS_BLACKLIST: Lazy<RwLock<HashMap<DcKey, f64>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 pub static DC_FAIL_UNTIL: Lazy<RwLock<HashMap<DcKey, f64>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));

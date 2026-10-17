@@ -884,8 +884,16 @@ pub async fn bridge_ws<R, W>(
                     break;
                 }
                 Err(_) => {
-                    *close_reason_up_c.lock().await = "client: timeout".to_string();
-                    break;
+                    // Клиент молчал BRIDGE_READ_TIMEOUT. Не рвём мост, если
+                    // соединение активно в обратную сторону — это фоновая
+                    // неактивная сессия Telegram, а не мёртвый сокет.
+                    // Разрыв — только при полной тишине в обе стороны
+                    // дольше BRIDGE_IDLE_TEARDOWN (мобильная правка).
+                    if la_up.lock().await.elapsed() >= BRIDGE_IDLE_TEARDOWN {
+                        *close_reason_up_c.lock().await = "client: idle".to_string();
+                        break;
+                    }
+                    continue;
                 }
             };
 
@@ -941,8 +949,14 @@ pub async fn bridge_ws<R, W>(
             let mut data = match recv_res {
                 Ok(d) => d,
                 Err(WsError::Timeout) => {
-                    *close_reason_down_c.lock().await =
-                        "upstream: timeout".to_string();
+                    // Апстрим молчал BRIDGE_READ_TIMEOUT (понги внутри
+                    // recv_with_timeout окно продлевают, значит их реально
+                    // не было). Даём ещё одно окно, если клиент недавно
+                    // был активен, — не рвём живую сессию из-за апстрима.
+                    if la_down.lock().await.elapsed() < BRIDGE_READ_TIMEOUT {
+                        continue;
+                    }
+                    *close_reason_down_c.lock().await = "upstream: timeout".to_string();
                     break;
                 }
                 Err(_) => {
@@ -1777,7 +1791,11 @@ async fn serve_core<R, W>(
     let dc_configured = target_opt.is_some();
     let target = target_opt.unwrap_or_default();
 
-    let blacklisted = WS_BLACKLIST.read().get(&dc_key).copied().unwrap_or(false);
+    let blacklisted = WS_BLACKLIST
+        .read()
+        .get(&dc_key)
+        .map(|until| now < *until)
+        .unwrap_or(false);
     let ip_cooldown_active = if target.is_empty() {
         false
     } else {
@@ -1938,8 +1956,14 @@ async fn serve_core<R, W>(
         }
 
         if ws_failed_redirect && all_redirects {
-            WS_BLACKLIST.write().insert(dc_key, true);
-            lwarn!("[{}] DC{}{} blacklisted for WS (all 302)", label, dc, m_tag);
+            WS_BLACKLIST.write().insert(dc_key, now + WS_BLACKLIST_TTL);
+            lwarn!(
+                "[{}] DC{}{} blacklisted for WS (all 302) for {}s",
+                label,
+                dc,
+                m_tag,
+                WS_BLACKLIST_TTL as i64
+            );
         } else if ws_failed_redirect {
             DC_FAIL_UNTIL.write().insert(dc_key, now + DC_FAIL_COOLDOWN);
         } else {
@@ -2005,8 +2029,8 @@ async fn serve_core<R, W>(
         match retry_ws {
             None => {
                 if retry_failed_redirect && retry_all_redirects {
-                    WS_BLACKLIST.write().insert(dc_key, true);
-                    lwarn!(" DC{}{} заблокирован (302)", dc, m_tag);
+                    WS_BLACKLIST.write().insert(dc_key, now + WS_BLACKLIST_TTL);
+                    lwarn!(" DC{}{} заблокирован (302) на {}s", dc, m_tag, WS_BLACKLIST_TTL as i64);
                 }
                 lwarn!(" direct fallback DC{}{}", dc, m_tag);
                 let splitter_fb = MsgSplitter::new(&relay_init, proto_int);
