@@ -362,6 +362,29 @@ pub extern "C" fn SetProxyProtocol(v: c_int) {
     });
 }
 
+/// Реакция на смену сети (Wi-Fi <-> LTE): старые IP-кулдауны, чёрные списки,
+/// TLS-пометки и fronting-эвристика больше не соответствуют новой сети.
+/// Безопасно вызывать в любой момент, в том числе при незапущенном прокси.
+/// Возвращает 0, если прокси запущен, -1 если нет.
+#[unsafe(no_mangle)]
+pub extern "C" fn NotifyNetworkChanged() -> c_int {
+    guarded_or("NotifyNetworkChanged", -2, || {
+        let running = state_cell().lock().is_some();
+        IP_FAIL_UNTIL.write().clear();
+        WS_BLACKLIST.write().clear();
+        DC_FAIL_UNTIL.write().clear();
+        crate::ws::tls_verify_skip_all();
+        cfproxy::clear_cfproxy_429_cooldowns();
+        proxy::set_ws_pool_fronting_first(true);
+        if running {
+            linfo!("NotifyNetworkChanged: state reset for new network");
+            0
+        } else {
+            -1
+        }
+    })
+}
+
 /// # Safety
 /// `c_secret` — валидная C-строка или null.
 #[unsafe(no_mangle)]

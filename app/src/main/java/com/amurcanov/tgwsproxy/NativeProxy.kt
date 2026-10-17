@@ -20,6 +20,7 @@ interface ProxyLibrary : Library {
     fun SetDisableSecure(v: Int)
     fun SetForceTestDc(v: Int)
     fun SetProxyProtocol(v: Int)
+    fun NotifyNetworkChanged(): Int
     fun GetSecretWithPrefix(): Pointer?
     fun GetStats(): Pointer?
     fun FreeString(p: Pointer)
@@ -72,6 +73,11 @@ object NativeProxy {
 
     fun setProxyProtocol(v: Boolean) {
         ProxyLibrary.INSTANCE.SetProxyProtocol(if (v) 1 else 0)
+    }
+
+    /** Сброс нативных кулдаунов/чёрных списков при смене сети (Wi-Fi <-> LTE) */
+    fun notifyNetworkChanged(): Int {
+        return ProxyLibrary.INSTANCE.NotifyNetworkChanged()
     }
 
     /** Returns the full secret with correct prefix (dd or ee+domain_hex) */

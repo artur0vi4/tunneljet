@@ -10,6 +10,10 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
@@ -31,6 +35,10 @@ class ProxyService : Service() {
     private var notificationStartedAtMs: Long = 0L
     @Volatile
     private var stopInProgress = false
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    @Volatile
+    private var lastNetworkNotifyAtMs: Long = 0L
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     // Saved intent extras for restart on kill / onTaskRemoved
@@ -64,9 +72,14 @@ class ProxyService : Service() {
         private const val WAKELOCK_TIMEOUT_MS = 30L * 60 * 1000
         private const val WAKELOCK_REFRESH_MS = 25L * 60 * 1000
 
-        // Stats/notification update interval
-        private const val STATS_UPDATE_MS = 3_000L
-        private const val NOTIFICATION_MIN_UPDATE_MS = 3_000L
+        // Stats/notification update interval.
+        // Battery fix (issue #271): опрос каждые 3с с постоянно меняющимся
+        // текстом уведомления будил системный планировщик; 10с опроса и
+        // 15с минимум между обновлениями уведомления достаточно.
+        private const val STATS_UPDATE_MS = 10_000L
+        private const val NOTIFICATION_MIN_UPDATE_MS = 15_000L
+        // Debounce вызовов нативного NotifyNetworkChanged
+        private const val NETWORK_NOTIFY_DEBOUNCE_MS = 2_000L
         private const val NATIVE_STOP_WAIT_MS = 3_000L
 
         private val _isRunning = MutableStateFlow(false)
@@ -161,6 +174,7 @@ class ProxyService : Service() {
         }
 
         acquireWakeLock()
+        registerNetworkCallback()
         stopInProgress = false
         
         // Start Go proxy in a separate thread with error handling
@@ -241,6 +255,59 @@ class ProxyService : Service() {
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * Смена сети (Wi-Fi <-> LTE <-> авиарежим) сбрасывает нативные кулдауны,
+     * чёрные списки и TLS-пометки: без этого прокси мог держаться за маршрут
+     * прежней сети до перезапуска (issue #262).
+     */
+    private fun registerNetworkCallback() {
+        if (networkCallback != null) return
+        try {
+            val cm = getSystemService(CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    notifyNetworkChanged("available")
+                }
+
+                override fun onLost(network: Network) {
+                    notifyNetworkChanged("lost")
+                }
+            }
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            cm.registerNetworkCallback(request, cb)
+            networkCallback = cb
+            Log.d(TAG, "NetworkCallback registered")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to register NetworkCallback", e)
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        try {
+            networkCallback?.let { cb ->
+                (getSystemService(CONNECTIVITY_SERVICE) as? ConnectivityManager)
+                    ?.unregisterNetworkCallback(cb)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to unregister NetworkCallback", e)
+        }
+        networkCallback = null
+    }
+
+    private fun notifyNetworkChanged(reason: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastNetworkNotifyAtMs < NETWORK_NOTIFY_DEBOUNCE_MS) return
+        lastNetworkNotifyAtMs = now
+        Log.i(TAG, "Network changed ($reason): resetting native cooldowns")
+        try {
+            NativeProxy.notifyNetworkChanged()
+        } catch (e: Throwable) {
+            Log.w(TAG, "notifyNetworkChanged failed", e)
         }
     }
 
@@ -330,6 +397,7 @@ class ProxyService : Service() {
             updateNotification(getString(R.string.notification_stopping), force = true)
             requestNativeStop("stop")
             releaseWakeLock()
+            unregisterNetworkCallback()
             updateRunningState(false)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -506,6 +574,7 @@ class ProxyService : Service() {
         statsJob?.cancel()
         statsJob = null
         releaseWakeLock()
+        unregisterNetworkCallback()
         if (_isRunning.value) {
             updateRunningState(false)
         }
