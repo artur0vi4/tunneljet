@@ -35,9 +35,11 @@ serde_json = "1"
 android_logger = "0.14"
 log = "0.4"
 
+# panic = "abort" убран: любой паник в Rust-коде завершал весь процесс
+# приложения через SIGABRT (upstream issue #288). Теперь unwind перехватывается
+# catch_unwind на границе FFI (см. lib.rs::guarded_or).
 [profile.release]
 opt-level = "z"
 lto = true
 codegen-units = 1
-panic = "abort"
 strip = true

@@ -10,7 +10,9 @@ use config::*;
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use proxy::{parse_cidr_pool, run_proxy, ProxyPools};
+use std::any::Any;
 use std::collections::HashMap;
+use std::panic;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::sync::atomic::Ordering;
@@ -53,6 +55,48 @@ fn cstr_to_string(p: *const c_char) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Panic barrier — upstream issue #288
+//
+// Раньше [profile.release] panic="abort" превращал любой паник в нативном коде
+// в SIGABRT и убивал всё приложение. Даже с unwind-профилем паник, вышедший
+// за extern "C", абортится (Rust >= 1.81), поэтому каждый экспорт обёрнут в
+// catch_unwind: паник логируется и превращается в код ошибки/значение по
+// умолчанию, а процесс приложения продолжает жить.
+// ---------------------------------------------------------------------------
+
+static PANIC_HOOK: OnceCell<()> = OnceCell::new();
+
+fn install_panic_hook() {
+    PANIC_HOOK.get_or_init(|| {
+        panic::set_hook(Box::new(|info| {
+            lerror!("rust panic: {}", info);
+        }));
+    });
+}
+
+fn log_panic_payload(name: &str, payload: Box<dyn Any + Send>) {
+    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    };
+    lerror!("panic recovered in {}: {}", name, msg);
+}
+
+/// Выполняет `f`, перехватывая паник: возвращает `default`, если случился паник.
+fn guarded_or<T>(name: &str, default: T, f: impl FnOnce() -> T) -> T {
+    match panic::catch_unwind(panic::AssertUnwindSafe(f)) {
+        Ok(v) => v,
+        Err(payload) => {
+            log_panic_payload(name, payload);
+            default
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
 
@@ -66,18 +110,30 @@ pub unsafe extern "C" fn StartProxy(
     c_secret: *const c_char,
     verbose: c_int,
 ) -> c_int {
+    install_panic_hook();
+    let host = cstr_to_string(c_host);
+    let dc_ips_str = cstr_to_string(c_dc_ips);
+    let secret_str = cstr_to_string(c_secret);
+    let go_port = port as u16;
+    let is_verbose = verbose != 0;
+    guarded_or("StartProxy", -2, move || {
+        start_proxy_impl(host, go_port, dc_ips_str, secret_str, is_verbose)
+    })
+}
+
+fn start_proxy_impl(
+    host: String,
+    go_port: u16,
+    dc_ips_str: String,
+    secret_str: String,
+    is_verbose: bool,
+) -> c_int {
     let cell = state_cell();
     let mut guard = cell.lock();
 
     if guard.is_some() {
         return -1;
     }
-
-    let host = cstr_to_string(c_host);
-    let go_port = port as u16;
-    let dc_ips_str = cstr_to_string(c_dc_ips);
-    let secret_str = cstr_to_string(c_secret);
-    let is_verbose = verbose != 0;
 
     init_logging(is_verbose);
     cfproxy::clear_cfproxy_429_cooldowns();
@@ -146,6 +202,11 @@ pub unsafe extern "C" fn StartProxy(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn StopProxy() -> c_int {
+    install_panic_hook();
+    guarded_or("StopProxy", -2, stop_proxy_impl)
+}
+
+fn stop_proxy_impl() -> c_int {
     let cell = state_cell();
     let mut guard = cell.lock();
 
@@ -183,6 +244,10 @@ pub extern "C" fn StopProxy() -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn SetPoolSize(size: c_int) {
+    guarded_or("SetPoolSize", (), || set_pool_size_impl(size))
+}
+
+fn set_pool_size_impl(size: c_int) {
     // Оригинал: pool_size = max(0, N); 0 отключает преконнект пула.
     let mut n = size;
     if n < 0 {
@@ -196,6 +261,10 @@ pub extern "C" fn SetPoolSize(size: c_int) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn SetBufferSizeKb(kb: c_int) {
+    guarded_or("SetBufferSizeKb", (), || set_buffer_size_kb_impl(kb))
+}
+
+fn set_buffer_size_kb_impl(kb: c_int) {
     // proxy --buf-kb: размер SO_RCVBUF/SO_SNDBUF, минимум 4KB.
     let mut n = kb;
     if n < 4 {
@@ -214,7 +283,9 @@ pub extern "C" fn SetBufferSizeKb(kb: c_int) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SetCfProxyCacheDir(c_cache_dir: *const c_char) {
     let dir = cstr_to_string(c_cache_dir);
-    CFPROXY.write().cache_dir = dir.trim().to_string();
+    guarded_or("SetCfProxyCacheDir", (), move || {
+        CFPROXY.write().cache_dir = dir.trim().to_string();
+    });
 }
 
 /// # Safety
@@ -225,8 +296,14 @@ pub unsafe extern "C" fn SetCfProxyConfig(
     _priority: c_int,
     c_user_domain: *const c_char,
 ) {
-    CFPROXY_ENABLED.store(enabled != 0, Ordering::Relaxed);
     let user_domain = cstr_to_string(c_user_domain);
+    guarded_or("SetCfProxyConfig", (), move || {
+        set_cf_proxy_config_impl(enabled, user_domain)
+    });
+}
+
+fn set_cf_proxy_config_impl(enabled: c_int, user_domain: String) {
+    CFPROXY_ENABLED.store(enabled != 0, Ordering::Relaxed);
     // Поддержка нескольких доменов как --cfproxy-domain (repeatable).
     let list = coerce_domain_list_str(&user_domain);
     let mut cfg = CFPROXY.write();
@@ -245,7 +322,9 @@ pub unsafe extern "C" fn SetCfProxyConfig(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SetCfWorkerDomains(c_domains: *const c_char) {
     let raw = cstr_to_string(c_domains);
-    *CF_WORKER_DOMAINS.write() = coerce_domain_list_str(&raw);
+    guarded_or("SetCfWorkerDomains", (), move || {
+        *CF_WORKER_DOMAINS.write() = coerce_domain_list_str(&raw);
+    });
 }
 
 /// # Safety
@@ -253,25 +332,33 @@ pub unsafe extern "C" fn SetCfWorkerDomains(c_domains: *const c_char) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SetFakeTlsDomain(c_domain: *const c_char) {
     let d = cstr_to_string(c_domain);
-    *FAKE_TLS_DOMAIN.write() = d.trim().to_string();
+    guarded_or("SetFakeTlsDomain", (), move || {
+        *FAKE_TLS_DOMAIN.write() = d.trim().to_string();
+    });
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn SetDisableSecure(v: c_int) {
-    // --no-secure: порт 80 для CF proxy/worker.
-    DISABLE_SECURE.store(v != 0, Ordering::Relaxed);
+    guarded_or("SetDisableSecure", (), || {
+        // --no-secure: порт 80 для CF proxy/worker.
+        DISABLE_SECURE.store(v != 0, Ordering::Relaxed);
+    });
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn SetForceTestDc(v: c_int) {
-    // --force-test-dc: весь трафик на тестовые DC.
-    FORCE_TEST_DC.store(v != 0, Ordering::Relaxed);
+    guarded_or("SetForceTestDc", (), || {
+        // --force-test-dc: весь трафик на тестовые DC.
+        FORCE_TEST_DC.store(v != 0, Ordering::Relaxed);
+    });
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn SetProxyProtocol(v: c_int) {
-    // --proxy-protocol: принимать PROXY protocol v1.
-    PROXY_PROTOCOL.store(v != 0, Ordering::Relaxed);
+    guarded_or("SetProxyProtocol", (), || {
+        // --proxy-protocol: принимать PROXY protocol v1.
+        PROXY_PROTOCOL.store(v != 0, Ordering::Relaxed);
+    });
 }
 
 /// # Safety
@@ -279,6 +366,10 @@ pub extern "C" fn SetProxyProtocol(v: c_int) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SetSecret(c_secret: *const c_char) {
     let s = cstr_to_string(c_secret);
+    guarded_or("SetSecret", (), move || set_secret_impl(s));
+}
+
+fn set_secret_impl(s: String) {
     if s.len() != 32 {
         return;
     }
@@ -290,21 +381,25 @@ pub unsafe extern "C" fn SetSecret(c_secret: *const c_char) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn GetStats() -> *mut c_char {
-    let s = STATS.summary();
-    CString::new(s).unwrap_or_default().into_raw()
+    guarded_or("GetStats", std::ptr::null_mut(), || {
+        let s = STATS.summary();
+        CString::new(s).unwrap_or_default().into_raw()
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn GetSecretWithPrefix() -> *mut c_char {
-    // ee-secret при включённом FakeTLS: ee{secret}{domain_hex} — как в оригинале.
-    let sec = PROXY_SECRET.read().clone();
-    let ftls = FAKE_TLS_DOMAIN.read().clone();
-    let full = if ftls.is_empty() {
-        format!("dd{}", sec)
-    } else {
-        format!("ee{}{}", sec, ftls.as_bytes().iter().map(|b| format!("{:02x}", b)).collect::<String>())
-    };
-    CString::new(full).unwrap_or_default().into_raw()
+    guarded_or("GetSecretWithPrefix", std::ptr::null_mut(), || {
+        // ee-secret при включённом FakeTLS: ee{secret}{domain_hex} — как в оригинале.
+        let sec = PROXY_SECRET.read().clone();
+        let ftls = FAKE_TLS_DOMAIN.read().clone();
+        let full = if ftls.is_empty() {
+            format!("dd{}", sec)
+        } else {
+            format!("ee{}{}", sec, ftls.as_bytes().iter().map(|b| format!("{:02x}", b)).collect::<String>())
+        };
+        CString::new(full).unwrap_or_default().into_raw()
+    })
 }
 
 /// # Safety
@@ -314,7 +409,8 @@ pub unsafe extern "C" fn FreeString(p: *mut c_char) {
     if p.is_null() {
         return;
     }
-    unsafe {
+    // Освобождение строки не должно паниковать; барьер — на всякий случай.
+    let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| unsafe {
         let _ = CString::from_raw(p);
-    }
+    }));
 }
