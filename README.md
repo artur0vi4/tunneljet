@@ -55,15 +55,6 @@ Telegram Android → Локальный MTProto (по умолчанию 127.0.0
 
 ---
 
-# 🎦 Видео гайд по установке и использованию
-
-<div align="center">
-
-<img width="1376" height="768" alt="578516258-6b2df494-de8d-44a2-a281-389fc7551a7c" src="https://github.com/user-attachments/assets/ed1449d4-0a14-4b46-8f35-b787bdee3e32" />
-
-<br><br>
-
-[**Смотреть на YouTube**](https://youtu.be/RP4RwyEHpwc) | [**Смотреть в Telegram**](https://t.me/avencoreschat/506796)
 
 </div>
 
