@@ -137,7 +137,7 @@ pub static CFPROXY_429: Lazy<RwLock<HashMap<String, Cfproxy429State>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
 pub const CFPROXY_DOMAINS_URL: &str =
-    "https://raw.githubusercontent.com/Flowseal/tg-ws-proxy/main/.github/cfproxy-domains.txt";
+    "https://raw.githubusercontent.com/artur0vi4/tunneljet/main/.github/cfproxy-domains.txt";
 
 // MTProto proxy secret
 pub static PROXY_SECRET: Lazy<RwLock<String>> =

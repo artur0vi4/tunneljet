@@ -99,16 +99,14 @@ import kotlin.math.min
 import kotlin.math.sin
 import kotlinx.coroutines.launch
 
-private const val AndroidForkRepoUrl = "https://github.com/amurcanov/tg-ws-proxy-android"
-private const val AndroidForkIssuesUrl = "https://github.com/amurcanov/tg-ws-proxy-android/issues"
-private const val DeveloperProfileUrl = "https://github.com/amurcanov"
+private const val AndroidForkRepoUrl = "https://github.com/artur0vi4/tunneljet"
+private const val AndroidForkIssuesUrl = "https://github.com/artur0vi4/tunneljet/issues"
+private const val DeveloperProfileUrl = "https://github.com/artur0vi4"
 private const val OriginalProjectUrl = "https://github.com/Flowseal/tg-ws-proxy"
 private const val ProxyReferenceUrl = "https://github.com/Flowseal/tg-ws-proxy/issues/389"
-private const val AndroidAppDonateUrl = ""
-private const val OriginalIdeaDonateUrl = ""
+private const val TunneljetFundingUrl = "https://github.com/artur0vi4/tunneljet/blob/main/docs/RU/Funding.md"
 
 private val DonateActionButtonColor = Color(0xFF00AEA5)
-private val OriginalIdeaDonateColor = Color(0xFFFF8A24)
 
 private val Android16BlobShape: Shape = GenericShape { size, _ ->
     val centerX = size.width / 2f
@@ -132,7 +130,6 @@ fun InfoTab(settingsStore: SettingsStore) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var showHelpDialog by remember { mutableStateOf(false) }
-    var showDonateDialog by remember { mutableStateOf(false) }
     var actionsExpanded by rememberSaveable { mutableStateOf(true) }
     var projectExpanded by rememberSaveable { mutableStateOf(true) }
     var isCheckingUpdates by remember { mutableStateOf(false) }
@@ -204,7 +201,7 @@ fun InfoTab(settingsStore: SettingsStore) {
             )
         }
 
-            InfoHeroCard(onSupportClick = { showDonateDialog = true })
+            InfoHeroCard(onSupportClick = { openUrlInBrowser(context, TunneljetFundingUrl) })
 
             ExpandableSectionCard(
             title = stringResource(R.string.actions),
@@ -399,10 +396,6 @@ fun InfoTab(settingsStore: SettingsStore) {
 
     }
 
-    if (showDonateDialog) {
-        DonateDialog(onDismiss = { showDonateDialog = false })
-    }
-
     pendingManualRelease?.let { release ->
         AppUpdateDialog(
             release = release,
@@ -588,7 +581,7 @@ private fun InfoHeroCard(onSupportClick: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     HeroMetaPill(
-                        text = "Amurcanov Fork",
+                        text = "artur0vi4 Fork",
                         containerColor = glassColor,
                         borderColor = glassBorder,
                         modifier = Modifier.weight(1f)
@@ -952,101 +945,6 @@ private fun ProjectLinkRow(
     }
 }
 
-@Composable
-private fun SupportAccentCard(onClick: () -> Unit) {
-    val colors = MaterialTheme.colorScheme
-
-    Surface(
-        shape = RoundedCornerShape(32.dp),
-        color = colors.secondaryContainer.copy(alpha = 0.94f),
-        shadowElevation = 10.dp,
-        tonalElevation = 2.dp
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(20.dp)
-        ) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .offset(x = 18.dp, y = (-20).dp)
-                    .size(88.dp)
-                    .clip(Android16BlobShape)
-                    .background(colors.primary.copy(alpha = 0.09f))
-            )
-
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = colors.surface.copy(alpha = 0.88f)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Favorite,
-                            contentDescription = null,
-                            tint = DonateActionButtonColor,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            text = stringResource(R.string.support_project),
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = colors.onSurface
-                        )
-                    }
-                }
-
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(
-                        text = stringResource(R.string.support_title),
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Black,
-                        color = colors.onSurface
-                    )
-                    Text(
-                        text = stringResource(R.string.support_subtitle),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = colors.onSurfaceVariant,
-                        lineHeight = 21.sp
-                    )
-                }
-
-                Button(
-                    onClick = onClick,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(54.dp),
-                    shape = RoundedCornerShape(24.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = DonateActionButtonColor,
-                        contentColor = Color.White
-                    )
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Favorite,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = stringResource(R.string.open_donation_options),
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp
-                    )
-                }
-            }
-        }
-    }
-}
-
 private fun buildSupportReport(
     port: String,
     poolSize: Int,
@@ -1135,125 +1033,6 @@ private fun buildSupportReport(
         appendLine(context.getString(R.string.report_recent_errors))
         append(errorsBlock)
     }.trim()
-}
-
-@Composable
-private fun DonateDialog(
-    onDismiss: () -> Unit
-) {
-    val context = LocalContext.current
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Surface(
-            shape = RoundedCornerShape(32.dp),
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 10.dp,
-            shadowElevation = 14.dp,
-            modifier = Modifier.fillMaxWidth(0.92f)
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 24.dp, vertical = 22.dp),
-                verticalArrangement = Arrangement.spacedBy(20.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Text(
-                        text = stringResource(R.string.donate_developers),
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Black,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.weight(1f)
-                    )
-                    FilledTonalIconButton(onClick = onDismiss) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = stringResource(R.string.close)
-                        )
-                    }
-                }
-
-                DonateSection(
-                    title = stringResource(R.string.donate_android_author),
-                    buttonColor = AppColors.donate,
-                    onClick = { openUrlInBrowser(context, AndroidAppDonateUrl) }
-                ) {
-                    Icon(
-                        painter = painterResource(id = R.drawable.ic_yoomoney),
-                        contentDescription = "ЮMoney",
-                        tint = Color.Unspecified,
-                        modifier = Modifier
-                            .width(126.dp)
-                            .height(28.dp)
-                    )
-                }
-
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
-
-                DonateSection(
-                    title = stringResource(R.string.donate_original_author),
-                    buttonColor = OriginalIdeaDonateColor,
-                    onClick = { openUrlInBrowser(context, OriginalIdeaDonateUrl) }
-                ) {
-                    Icon(
-                        painter = painterResource(id = R.drawable.ic_crypto_wordmark),
-                        contentDescription = "Crypto",
-                        tint = Color.Unspecified,
-                        modifier = Modifier
-                            .width(138.dp)
-                            .height(24.dp)
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun DonateSection(
-    title: String,
-    buttonColor: Color,
-    onClick: () -> Unit,
-    buttonContent: @Composable RowScope.() -> Unit
-) {
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-            color = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.fillMaxWidth(),
-            textAlign = TextAlign.Center
-        )
-
-        Button(
-            onClick = onClick,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(62.dp),
-            shape = RoundedCornerShape(22.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = buttonColor,
-                contentColor = Color.White
-            )
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically,
-                content = buttonContent
-            )
-        }
-    }
 }
 
 @Composable

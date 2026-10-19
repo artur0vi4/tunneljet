@@ -2,6 +2,8 @@
 name = "tgwsproxy"
 version = "1.1.0"
 edition = "2021"
+authors = ["artur0vi4"]
+repository = "https://github.com/artur0vi4/tunneljet"
 
 [lib]
 name = "tgwsproxy"
