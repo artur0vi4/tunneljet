@@ -70,6 +70,13 @@ pub const FRONTING_SNI: &str = "sprinthost.ru";
 // proxy/pool.py::_CfWorkerPool
 pub const CF_WORKER_POOL_MAX_AGE: f64 = 100.0;
 pub const CF_WORKER_PER_DC_LIMIT: usize = 1;
+// v1.0.3 (порт Flowseal #1517): backoff неудачных refill, проактивная ротация
+// стейл-соединений и cooldown домена при rate-limit — по образцу WsPool выше.
+pub const CF_WORKER_CHECK_INTERVAL: f64 = 10.0;
+pub const CF_WORKER_REFILL_BACKOFF_INITIAL: f64 = 1.0;
+pub const CF_WORKER_REFILL_BACKOFF_MAX: f64 = 3600.0;
+// Cooldown worker-домена при 429 (rate limit) / 403 (отклонено).
+pub const CF_WORKER_FAILURE_COOLDOWN: f64 = 300.0;
 
 // WS пути — proxy/utils.py
 pub const WS_PATH: &str = "/apiws";
