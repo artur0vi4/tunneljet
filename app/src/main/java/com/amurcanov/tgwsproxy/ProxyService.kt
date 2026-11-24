@@ -146,7 +146,29 @@ class ProxyService : Service() {
     private fun startProxy(bindIp: String, port: Int, ips: String, poolSize: Int = 4,
                            cfEnabled: Boolean = true, cfPriority: Boolean = true,
                            cfDomain: String = "", secretKey: String = "") {
-        if (_isRunning.value || stopInProgress) return
+        // v1.0.4 (порт Flowseal #1529): не запускать второй прокси, пока первый
+        // ещё останавливается — ждём завершения остановки и стартуем следом
+        // (как в оригинале: start_proxy после таймаут-стопа должен работать).
+        if (_isRunning.value) return
+        if (stopInProgress) {
+            Log.i(TAG, "Start requested while stop is in progress — waiting for stop to finish")
+            serviceScope.launch {
+                val waitUntilMs = System.currentTimeMillis() + NATIVE_STOP_WAIT_MS + 500L
+                while (stopInProgress && System.currentTimeMillis() < waitUntilMs) {
+                    delay(100)
+                }
+                if (stopInProgress) {
+                    Log.w(TAG, "Native stop did not finish in time, start request dropped")
+                    return@launch
+                }
+                startProxy(
+                    bindIp = bindIp, port = port, ips = ips, poolSize = poolSize,
+                    cfEnabled = cfEnabled, cfPriority = cfPriority,
+                    cfDomain = cfDomain, secretKey = secretKey
+                )
+            }
+            return
+        }
         _isVerifiedRunning.value = false
 
         // Save params for restart
@@ -399,6 +421,10 @@ class ProxyService : Service() {
             releaseWakeLock()
             unregisterNetworkCallback()
             updateRunningState(false)
+            // v1.0.4 (порт Flowseal #1529): флаг снимаем только после того, как
+            // нативная остановка реально завершилась — ожидающий старт сможет
+            // продолжить вместо тихого отброса.
+            stopInProgress = false
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
             } else {

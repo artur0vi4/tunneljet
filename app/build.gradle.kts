@@ -12,8 +12,8 @@ android {
     defaultConfig {
         applicationId = "app.tunneljet"
         targetSdk = 35
-        versionCode = 128
-        versionName = "1.0.3"
+        versionCode = 129
+        versionName = "1.0.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

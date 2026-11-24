@@ -75,8 +75,11 @@ pub const CF_WORKER_PER_DC_LIMIT: usize = 1;
 pub const CF_WORKER_CHECK_INTERVAL: f64 = 10.0;
 pub const CF_WORKER_REFILL_BACKOFF_INITIAL: f64 = 1.0;
 pub const CF_WORKER_REFILL_BACKOFF_MAX: f64 = 3600.0;
-// Cooldown worker-домена при 429 (rate limit) / 403 (отклонено).
-pub const CF_WORKER_FAILURE_COOLDOWN: f64 = 300.0;
+// v1.0.4 (порт Flowseal #1633): семантика cooldown'а воркера как в оригинале —
+// 429 (rate limit) -> до конца UTC-суток (вычисляется), HTTP >= 500 и сетевые
+// сбои (таймаут/io) -> короткий FAILURE_COOLDOWN, прочие handshake-коды
+// (челлендж/некорректный маршрут) -> домен не вычёркиваем.
+pub const CF_WORKER_FAILURE_COOLDOWN: f64 = 60.0;
 
 // WS пути — proxy/utils.py
 pub const WS_PATH: &str = "/apiws";

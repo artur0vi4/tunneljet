@@ -1,11 +1,14 @@
 use crate::config::{log_debug, log_warn, STATS};
 use hmac::{Hmac, Mac};
+use once_cell::sync::Lazy;
 use rand::RngCore;
 use sha2::Sha256;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 
@@ -20,6 +23,62 @@ const SESSION_ID_LEN: usize = 32;
 
 const TIMESTAMP_TOLERANCE: i64 = 120;
 const TLS_APPDATA_MAX: usize = 16384;
+
+// v1.0.4 (порт Flowseal #1532): защита от пробинга повтором ClientHello.
+// Hello, прошедший проверку времени, валиден ещё TIMESTAMP_TOLERANCE секунд
+// после создания (плюс секунда на усечение часов до обеих сторон) — столько
+// храним его client_random: любой повтор — реплей-проба, отвечаем маскировкой.
+const REPLAY_WINDOW_SECS: u64 = (2 * TIMESTAMP_TOLERANCE + 1) as u64;
+// В кэш попадают только hello, прошедшие HMAC с секретом, поэтому без секрета
+// нельзя забить кэш мусором и вытеснить чужую запись; лимит достигается только
+// этим числом настоящих handshake'ов за одно окно.
+const REPLAY_CACHE_SIZE: usize = 65536;
+
+struct ReplayCacheState {
+    // client_random -> expiry (монотонное время); порядок вставки в `order`
+    // совпадает с порядком expiry, протухшие записи выталкиваются с головы.
+    map: HashMap<[u8; 32], Instant>,
+    order: VecDeque<[u8; 32]>,
+}
+
+// Кэш один на процесс и сознательно переживает StopProxy/StartProxy (аналог
+// оригинала): hello, принятый прямо перед рестартом прокси, нельзя реплеить
+// сразу после него.
+static REPLAY_CACHE: Lazy<Mutex<ReplayCacheState>> = Lazy::new(|| {
+    Mutex::new(ReplayCacheState {
+        map: HashMap::new(),
+        order: VecDeque::new(),
+    })
+});
+
+/// true — hello виден впервые (и теперь записан), false — это реплей.
+fn replay_cache_first_seen(client_random: &[u8; 32]) -> bool {
+    let now = Instant::now();
+    let mut st = REPLAY_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    while let Some(oldest) = st.order.front().copied() {
+        match st.map.get(&oldest) {
+            Some(&exp) if exp > now => break,
+            _ => {
+                st.map.remove(&oldest);
+                st.order.pop_front();
+            }
+        }
+    }
+    if st.map.contains_key(client_random) {
+        return false;
+    }
+    if st.map.len() >= REPLAY_CACHE_SIZE {
+        if let Some(oldest) = st.order.pop_front() {
+            st.map.remove(&oldest);
+        }
+    }
+    let exp = now
+        .checked_add(Duration::from_secs(REPLAY_WINDOW_SECS))
+        .unwrap_or(now);
+    st.map.insert(*client_random, exp);
+    st.order.push_back(*client_random);
+    true
+}
 
 const READ_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_RECORD_TIMEOUT: Duration = Duration::from_secs(10);
@@ -357,6 +416,19 @@ pub async fn server_handshake(
 
     match verify_client_hello(&client_hello, secret) {
         Some((client_random, session_id, ts)) => {
+            // v1.0.4: записанный hello остаётся валидным ещё минуты; ответ на
+            // его повтор выдал бы активному пробировщику, что это прокси, а не
+            // маскирующий сайт — поэтому повтор уходит в маскировку.
+            if !replay_cache_first_seen(&client_random) {
+                log_debug(&format!(
+                    "[{}] Fake TLS hello replayed (size={} rec={}) -> masking",
+                    label,
+                    client_hello.len(),
+                    record_len
+                ));
+                proxy_to_masking_domain(conn, client_hello, masking, label).await;
+                return None;
+            }
             log_debug(&format!("[{}] Fake TLS handshake ok (ts={})", label, ts));
             let server_hello = build_server_hello(secret, &client_random, &session_id);
             if conn.write_all(&server_hello).await.is_err() {

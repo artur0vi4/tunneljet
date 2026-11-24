@@ -528,6 +528,12 @@ pub struct CfWorkerPool {
     // v1.0.3 (порт Flowseal #1517): backoff неудачных refill —
     // dc -> (счётчик неудач, retry_after в монотонном времени).
     refill_failures: Mutex<HashMap<i32, (u32, f64)>>,
+    // v1.0.4 (порт Flowseal 324f69f): dc -> монотонное время, до которого
+    // refill отложен, потому что ВСЕ воркеры DC стоят на cooldown.
+    deferred_until: Mutex<HashMap<i32, f64>>,
+    // v1.0.4 (порт Flowseal 4a338a0): sticky-режим connect_one — каким
+    // соединением (TLS:443 или HTTP:80) последний раз удалось подключиться.
+    try_secure_first: AtomicBool,
     // v1.0.3: активные задачи проактивной ротации стейл-соединений.
     rotating: Mutex<HashSet<i32>>,
     cancel_token: CancellationToken,
@@ -540,6 +546,8 @@ impl CfWorkerPool {
             refilling: Mutex::new(HashSet::new()),
             exhausted_until: Mutex::new(HashMap::new()),
             refill_failures: Mutex::new(HashMap::new()),
+            deferred_until: Mutex::new(HashMap::new()),
+            try_secure_first: AtomicBool::new(true),
             rotating: Mutex::new(HashSet::new()),
             cancel_token,
         }
@@ -592,7 +600,43 @@ impl CfWorkerPool {
         }
     }
 
+    // v1.0.4 (порт Flowseal 324f69f): пока ВСЕ воркеры DC на cooldown,
+    // refill не спавним — откладываем до ближайшего «освобождения» домена.
+    // В оригинале exhausted_until — unix-время, а refill_after — монотонное;
+    // здесь дельту переносим в монотонную шкалу, не смешивая их напрямую.
+    async fn defer_if_all_workers_paused(&self, dc: i32, worker_domains: &[String]) -> bool {
+        if worker_domains.is_empty() {
+            return false;
+        }
+        let now_unix = now_unix_f64();
+        let first_available_unix = {
+            let exhausted = self.exhausted_until.lock().await;
+            worker_domains
+                .iter()
+                .filter_map(|d| exhausted.get(d).copied())
+                .fold(f64::INFINITY, f64::min)
+        };
+        if !first_available_unix.is_finite() {
+            return false;
+        }
+        let delta = (first_available_unix - now_unix).max(0.0);
+        if delta <= 0.0 {
+            return false;
+        }
+        let until = now_monotonic() + delta;
+        self.deferred_until.lock().await.insert(dc, until);
+        ldebug!(
+            "CF worker pool refill DC{} deferred {:.0}s: all workers on cooldown",
+            dc,
+            delta
+        );
+        true
+    }
+
     async fn schedule_refill(self: &Arc<Self>, dc: i32, fallback_dst: String, worker_domains: Vec<String>) {
+        if self.defer_if_all_workers_paused(dc, &worker_domains).await {
+            return;
+        }
         // Backoff (порт Flowseal #1517): после неудачи refill не раньше retry_after.
         {
             let failures = self.refill_failures.lock().await;
@@ -646,7 +690,7 @@ impl CfWorkerPool {
                 }
             }
             if let Some((ws, domain)) = pool
-                .connect_one(worker_domains.clone(), fallback_dst.clone(), dc)
+                .connect_one(worker_domains.clone(), fallback_dst.clone(), dc, 8.0)
                 .await
             {
                 {
@@ -665,6 +709,15 @@ impl CfWorkerPool {
                     .await;
                 ldebug!("CF worker pool refilled DC{}: ready", dc);
             } else {
+                // v1.0.4 (Flowseal 324f69f): все воркеры на cooldown — не
+                // копим backoff, просто ждём ближайшего освобождения домена.
+                if pool
+                    .defer_if_all_workers_paused(dc, &worker_domains)
+                    .await
+                {
+                    pool.refilling.lock().await.remove(&dc);
+                    return;
+                }
                 // Экспоненциальный backoff 1s..3600s (порт Flowseal #1517,
                 // по образцу WsPool::refill).
                 let mut failures = pool.refill_failures.lock().await;
@@ -687,6 +740,7 @@ impl CfWorkerPool {
     // v1.0.3: сброс backoff-счётчика (аналог WsPool::report_success).
     pub async fn report_success(&self, dc: i32) {
         self.refill_failures.lock().await.remove(&dc);
+        self.deferred_until.lock().await.remove(&dc);
     }
 
     // v1.0.3: проактивная ротация стейл-соединений (порт WsPool::rotate).
@@ -785,22 +839,71 @@ impl CfWorkerPool {
         self.rotating.lock().await.remove(&dc);
     }
 
-    async fn connect_one(
-        &self,
+    // v1.0.4 (порт Flowseal 4a338a0): публичный connect_one с настраиваемым
+    // таймаутом — bridge вызывает с 10s, refill — с 8s, как в оригинале.
+    // По каждому домену пробуем два режима: sticky (какой последним сработал)
+    // и обратный; таймаут переключает режим, остальные ошибки уводят к
+    // следующему домену через report_failure.
+    pub async fn connect_one(
+        self: &Arc<Self>,
         worker_domains: Vec<String>,
         fallback_dst: String,
         dc: i32,
+        timeout: f64,
     ) -> Option<(RawWebSocket, String)> {
-        let secure = !DISABLE_SECURE.load(Ordering::Relaxed);
         let query = format!("dst={}&dc={}", fallback_dst, dc);
         let path = format!("/apiws?{}", query);
+        let disable_secure = DISABLE_SECURE.load(Ordering::Relaxed);
+        let first_secure = self.try_secure_first.load(Ordering::Relaxed);
+        let modes: Vec<bool> = if disable_secure {
+            vec![false]
+        } else {
+            vec![first_secure, !first_secure]
+        };
         for worker_domain in self.available_domains(worker_domains).await {
-            match ws_connect_full_opts(&worker_domain, &worker_domain, &path, 8.0, None, Some(secure))
+            for (attempt, &secure) in modes.iter().enumerate() {
+                ldebug!(
+                    "CF worker connect DC{} via {} (tls={}, timeout={:.0}s)",
+                    dc,
+                    worker_domain,
+                    secure,
+                    timeout
+                );
+                match ws_connect_full_opts(
+                    &worker_domain,
+                    &worker_domain,
+                    &path,
+                    timeout,
+                    None,
+                    Some(secure),
+                )
                 .await
-            {
-                Ok(ws) => return Some((ws, worker_domain)),
-                Err(exc) => {
-                    self.report_failure(&worker_domain, &exc).await;
+                {
+                    Ok(ws) => {
+                        // Sticky: запоминаем сработавший режим.
+                        if !disable_secure {
+                            self.try_secure_first.store(secure, Ordering::Relaxed);
+                        }
+                        return Some((ws, worker_domain));
+                    }
+                    Err(exc) => {
+                        ldebug!(
+                            "CF worker connect DC{} via {} failed (tls={}): {}",
+                            dc,
+                            worker_domain,
+                            secure,
+                            exc.compact()
+                        );
+                        // Таймаут -> пробуем другой режим того же домена;
+                        // прочие ошибки -> cooldown и следующий домен.
+                        let timed_out = matches!(exc, WsError::Timeout)
+                            || matches!(&exc, WsError::Io(e) if e.kind() == std::io::ErrorKind::TimedOut);
+                        if attempt + 1 < modes.len() && timed_out {
+                            continue;
+                        }
+                        self.report_failure(&worker_domain, &exc).await;
+                        break;
+                    }
                 }
             }
         }
@@ -835,24 +938,41 @@ impl CfWorkerPool {
     }
 
     pub async fn report_failure(&self, worker_domain: &str, exc: &WsError) {
-        // v1.0.3 (порт семантики оригинала + Flowseal #1517): rate-limit отклик
-        // временно исключает домен из available_domains через exhausted_until.
-        // Сетевые сбои (таймаут, io) домен не вычёркивают.
-        if let Some(status) = exc.handshake_status() {
-            if status == 429 || status == 403 {
-                let mut exhausted = self.exhausted_until.lock().await;
-                exhausted.insert(
-                    worker_domain.to_string(),
-                    now_unix_f64() + CF_WORKER_FAILURE_COOLDOWN,
-                );
-                lwarn!(
-                    "CF worker {} rate-limited (http {}), cooldown {:.0}s",
-                    worker_domain,
-                    status,
-                    CF_WORKER_FAILURE_COOLDOWN
-                );
+        // v1.0.4 (порт Flowseal #1633): домен вычёркивается из available_domains
+        // через exhausted_until по правилам оригинала:
+        //  - 429 (у free-плана воркеров это дневной лимит) -> до конца UTC-суток;
+        //  - HTTP >= 500 и сетевые сбои (таймаут/io) -> FAILURE_COOLDOWN (60s);
+        //  - прочие handshake-коды (челлендж/некорректный маршрут) -> не вычёркиваем;
+        //  - домен уже на cooldown -> не продлеваем.
+        let now = now_unix_f64();
+        let (until, reason) = if let Some(status) = exc.handshake_status() {
+            if status == 429 {
+                (now + (86400.0 - (now % 86400.0)), "daily request limit".to_string())
+            } else if status >= 500 {
+                (now + CF_WORKER_FAILURE_COOLDOWN, format!("HTTP {}", status))
+            } else {
+                return;
             }
+        } else if matches!(exc, WsError::Timeout)
+            || matches!(exc, WsError::Io(_))
+        {
+            (now + CF_WORKER_FAILURE_COOLDOWN, exc.compact())
+        } else {
+            return;
+        };
+        {
+            let mut exhausted = self.exhausted_until.lock().await;
+            if exhausted.get(worker_domain).map(|u| *u > now).unwrap_or(false) {
+                return;
+            }
+            exhausted.insert(worker_domain.to_string(), until);
         }
+        lwarn!(
+            "CF worker {} disabled for {:.0}s: {}",
+            worker_domain,
+            (until - now).max(1.0),
+            reason
+        );
     }
 
     pub async fn warmup(self: &Arc<Self>, dc_opt_map: &HashMap<i32, String>) {
@@ -893,6 +1013,8 @@ impl CfWorkerPool {
         self.refilling.lock().await.clear();
         self.exhausted_until.lock().await.clear();
         self.refill_failures.lock().await.clear();
+        self.deferred_until.lock().await.clear();
+        self.try_secure_first.store(true, Ordering::Relaxed);
         self.rotating.lock().await.clear();
     }
 }
@@ -1591,39 +1713,23 @@ where
             );
             Some(ws)
         } else {
-            let secure = !DISABLE_SECURE.load(Ordering::Relaxed);
-            let query = format!("dst={}&dc={}", fallback_dst, dc);
-            let path = format!("/apiws?{}", query);
-            let mut found = None;
-            for worker_domain in pools.cf_worker.available_domains(worker_domains.clone()).await {
-                linfo!(
-                    "[{}] DC{}{} -> trying CF worker {} for {}",
-                    label, dc, m_tag, worker_domain, fallback_dst
-                );
-                match ws_connect_full_opts(
-                    &worker_domain,
-                    &worker_domain,
-                    &path,
-                    10.0,
-                    None,
-                    Some(secure),
-                )
+            // v1.0.4 (порт Flowseal 4a338a0): перебор воркеров переехал в
+            // CfWorkerPool::connect_one (TLS/HTTP-моды + sticky-режим);
+            // bridge вызывает его с таймаутом 10s, как в оригинале.
+            match pools
+                .cf_worker
+                .connect_one(worker_domains.clone(), fallback_dst.clone(), dc, 10.0)
                 .await
-                {
-                    Ok(ws) => {
-                        found = Some(ws);
-                        break;
-                    }
-                    Err(exc) => {
-                        pools.cf_worker.report_failure(&worker_domain, &exc).await;
-                        lwarn!(
-                            "[{}] DC{}{} CF worker {} failed: {}",
-                            label, dc, m_tag, worker_domain, exc.compact()
-                        );
-                    }
+            {
+                Some((ws, worker_domain)) => {
+                    linfo!(
+                        "[{}] DC{}{} -> CF worker {} for {}",
+                        label, dc, m_tag, worker_domain, fallback_dst
+                    );
+                    Some(ws)
                 }
+                None => None,
             }
-            found
         };
         if let Some(ws) = worker_ws {
             STATS.connections_cfproxy.fetch_add(1, Ordering::Relaxed);

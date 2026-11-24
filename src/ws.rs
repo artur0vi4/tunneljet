@@ -382,7 +382,11 @@ impl RawWebSocket {
         let frame = build_frame(OP_CLOSE, &[], true);
         let _ = self.write_frame(&frame, WS_CONTROL_TIMEOUT).await;
         let mut writer = self.writer.lock().await;
-        let _ = shutdown_match(&mut writer).await;
+        // v1.0.4 (порт Flowseal #1529): shutdown ограничен двумя секундами —
+        // молчаливый TLS-пиэр не должен задерживать остановку прокси. При
+        // таймауте просто уходим: close-фрейм уже отправлен, fd закроется при
+        // дропе RawWebSocket.
+        let _ = tokio::time::timeout(Duration::from_secs(2), shutdown_match(&mut writer)).await;
     }
 
     // recv с дедлайном чтения (для bridge).
@@ -824,6 +828,11 @@ pub async fn ws_connect_once(
     ws_connect_once_full(dial_addr, domain, path, timeout, None, secure).await
 }
 
+// v1.0.4: остаток до общего дедлайна хендшейка (порт Flowseal #1614).
+fn deadline_remaining(deadline: tokio::time::Instant) -> Duration {
+    deadline.saturating_duration_since(tokio::time::Instant::now())
+}
+
 pub async fn ws_connect_once_full(
     dial_addr: &str,
     domain: &str,
@@ -842,7 +851,12 @@ pub async fn ws_connect_once_full(
         format!("{}:80", dial_addr)
     };
 
-    let raw_conn = match tokio::time::timeout(timeout, TcpStream::connect(&target_addr)).await {
+    // v1.0.4 (порт Flowseal #1614): единый дедлайн на весь хендшейк — TCP,
+    // TLS и HTTP-апгрейд делят один таймаут; раньше каждый шаг получал полный
+    // timeout, и суммарное время соединения могло вырасти в несколько раз.
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    let raw_conn = match tokio::time::timeout_at(deadline, TcpStream::connect(&target_addr)).await {
         Ok(Ok(c)) => c,
         Ok(Err(e)) => return Err(WsError::Io(e)),
         Err(_) => return Err(WsError::Timeout),
@@ -851,7 +865,7 @@ pub async fn ws_connect_once_full(
 
     if !secure {
         let (read_half, write_half) = tokio::io::split(raw_conn);
-        return handshake_plain(read_half, write_half, domain, path, timeout).await;
+        return handshake_plain(read_half, write_half, domain, path, deadline_remaining(deadline)).await;
     }
 
     let sni_name = sni.unwrap_or(domain);
@@ -870,7 +884,12 @@ pub async fn ws_connect_once_full(
         };
         let connector = TlsConnector::from(cfg);
         let sni_server = server_name(sni_name);
-        match tokio::time::timeout(handshake_timeout, connector.connect(sni_server, raw_conn)).await {
+        match tokio::time::timeout(
+            handshake_timeout.min(deadline_remaining(deadline)),
+            connector.connect(sni_server, raw_conn),
+        )
+        .await
+        {
             Ok(Ok(c)) => c,
             Ok(Err(e)) => {
                 if is_cert_verify_error(&e) && secure_tls {
@@ -878,7 +897,7 @@ pub async fn ws_connect_once_full(
                     // повтор с прежним (без проверки) поведением на новом TCP.
                     tls_mark_verify_failed(verify_name);
                     ldebug!(" ws tls verify fail {} via {}: {}", domain, dial_addr, e);
-                    let raw_conn2 = match tokio::time::timeout(timeout, TcpStream::connect(&target_addr)).await {
+                    let raw_conn2 = match tokio::time::timeout_at(deadline, TcpStream::connect(&target_addr)).await {
                         Ok(Ok(c)) => {
                             set_sock_opts(&c);
                             c
@@ -888,7 +907,7 @@ pub async fn ws_connect_once_full(
                     };
                     let connector2 = TlsConnector::from(TLS_CONFIG.clone());
                     match tokio::time::timeout(
-                        handshake_timeout,
+                        handshake_timeout.min(deadline_remaining(deadline)),
                         connector2.connect(server_name(sni_name), raw_conn2),
                     )
                     .await
@@ -912,7 +931,7 @@ pub async fn ws_connect_once_full(
     };
 
     let (read_half, write_half) = tokio::io::split(tls_conn);
-    handshake_tls(read_half, write_half, domain, path, timeout).await
+    handshake_tls(read_half, write_half, domain, path, deadline_remaining(deadline)).await
 }
 
 // wsConnect: пытается ip, при необходимости резолвит DoH
