@@ -173,13 +173,33 @@ impl WsPool {
 
         let mut ws: Option<RawWebSocket> = None;
         {
-            let mut q = state.queue.lock().await;
-            while let Some(entry) = q.pop_front() {
+            // v1.0.5: достаём по одному и проверяем «живость» вне блокировки —
+            // WS ping с коротким таймаутом. Cloudflare рвёт простаивающие WS
+            // (~100s), а мёртвое соединение из пула — это «открыл телеграм,
+            // а он ничего не грузит»: первое сообщение уходит в мёртвый сокет.
+            loop {
+                let popped = {
+                    let mut q = state.queue.lock().await;
+                    q.pop_front().map(|e| (e, q.len()))
+                };
+                let (entry, left) = match popped {
+                    Some(x) => x,
+                    None => break,
+                };
                 let age = now - entry.created;
                 if age > WS_POOL_REUSE_MAX_AGE || entry.ws.is_closed() {
-                    let e = entry;
                     tokio::spawn(async move {
-                        e.ws.close().await;
+                        entry.ws.close().await;
+                    });
+                    continue;
+                }
+                let alive = tokio::time::timeout(WS_CONTROL_TIMEOUT, entry.ws.send_ping())
+                    .await
+                    .map(|r| r.is_ok())
+                    .unwrap_or(false);
+                if !alive {
+                    tokio::spawn(async move {
+                        entry.ws.close().await;
                     });
                     continue;
                 }
@@ -189,7 +209,7 @@ impl WsPool {
                     dc,
                     if is_media { "m" } else { "" },
                     age,
-                    q.len()
+                    left
                 );
                 ws = Some(entry.ws);
                 break;
@@ -560,24 +580,39 @@ impl CfWorkerPool {
         worker_domains: Vec<String>,
     ) -> Option<(RawWebSocket, String)> {
         let now = now_monotonic();
-        let entry = {
-            let mut map = self.idle.lock().await;
-            let bucket = map.entry(dc).or_insert_with(VecDeque::new);
-            let mut hit = None;
-            while let Some(e) = bucket.pop_front() {
-                if now - e.created > CF_WORKER_POOL_MAX_AGE || e.ws.is_closed() {
-                    let ws = e.ws;
-                    tokio::spawn(async move {
-                        ws.close().await;
-                    });
-                    continue;
-                }
-                hit = Some(e);
-                break;
+        // v1.0.5: достаём по одному и проверяем «живость» вне блокировки
+        // (WS ping с коротким таймаутом) — как в WsPool::get.
+        let mut hit: Option<CfWorkerEntry> = None;
+        loop {
+            let popped = {
+                let mut map = self.idle.lock().await;
+                let bucket = map.entry(dc).or_insert_with(VecDeque::new);
+                bucket.pop_front().map(|e| (e, bucket.len()))
+            };
+            let (e, _left) = match popped {
+                Some(x) => x,
+                None => break,
+            };
+            if now - e.created > CF_WORKER_POOL_MAX_AGE || e.ws.is_closed() {
+                tokio::spawn(async move {
+                    e.ws.close().await;
+                });
+                continue;
             }
-            hit
-        };
-        match entry {
+            let alive = tokio::time::timeout(WS_CONTROL_TIMEOUT, e.ws.send_ping())
+                .await
+                .map(|r| r.is_ok())
+                .unwrap_or(false);
+            if !alive {
+                tokio::spawn(async move {
+                    e.ws.close().await;
+                });
+                continue;
+            }
+            hit = Some(e);
+            break;
+        }
+        match hit {
             Some(e) => {
                 STATS.cf_pool_hits.fetch_add(1, Ordering::Relaxed);
                 ldebug!(
@@ -1546,6 +1581,16 @@ async fn try_cfproxy_base_domain(
         );
         return (None, String::new());
     }
+    // v1.0.5: короткий отдых после таймаута (см. cfproxy::mark_cfproxy_fail_cooldown).
+    let fail_remaining = cfproxy_fail_cooldown_remaining(&base_domain);
+    if fail_remaining > Duration::ZERO {
+        ldebug!(
+            " CF skip {}: fail cooldown {:.0}s",
+            base_domain,
+            fail_remaining.as_secs_f64().ceil()
+        );
+        return (None, String::new());
+    }
     let _permit = match acquire_cfproxy_attempt_slot().await {
         Some(p) => p,
         None => return (None, String::new()),
@@ -1560,6 +1605,11 @@ async fn try_cfproxy_base_domain(
         // выжигал бы домены и плодил лавину cooldown.
         if is_http_status_error(&e, 429) {
             mark_cfproxy_429_cooldown(&base_domain, &e);
+        } else if matches!(e, WsError::Timeout) {
+            // v1.0.5: таймаут — самый дорогой сбой (полные 5s) и на мёртвом
+            // домене стабильно повторяется, поэтому отдыхаем 60s. Reset/refused
+            // падают мгновенно — их не челим (см. комментарий выше).
+            mark_cfproxy_fail_cooldown(&base_domain);
         }
         if !resolved_ip.is_empty() {
             log_cf_conn_error(
@@ -1573,6 +1623,7 @@ async fn try_cfproxy_base_domain(
     }
 
     clear_cfproxy_429_cooldown(&base_domain);
+    clear_cfproxy_fail_cooldown(&base_domain);
     if !resolved_ip.is_empty() {
         ldebug!(" CF ok {} via {}", domain, resolved_ip);
     } else {
@@ -1612,6 +1663,13 @@ async fn cfproxy_acquire_ws(
 
     if !ordered.is_empty() && !ordered[0].is_empty() {
         let (w, d) = try_cfproxy_base_domain(dc, &ordered[0], ws_path).await;
+        if w.is_none() {
+            // v1.0.5: sticky-домен промахнулся — сменяем его, чтобы серийная
+            // попытка на следующем соединении не повторяла тот же промах.
+            crate::balancer::BALANCER
+                .write()
+                .demote_domain_for_dc(dc, &ordered[0]);
+        }
         ws = w;
         chosen_domain = d;
     }
@@ -1619,14 +1677,19 @@ async fn cfproxy_acquire_ws(
     if ws.is_none() && ordered.len() > 1 {
         let remaining_domains: Vec<String> = ordered[1..].to_vec();
         let sem = Arc::new(tokio::sync::Semaphore::new(CFPROXY_FALLBACK_PARALLEL));
+        // v1.0.5: отдельный токен гонки — как только первый домен ответил,
+        // отменяем остальные попытки вместо ожидания их таймаутов.
+        let race_token = CancellationToken::new();
         let mut handles = Vec::new();
         for bd in remaining_domains {
             let sem = sem.clone();
             let cancel = cancel_token.clone();
+            let race = race_token.clone();
             let ws_path = ws_path.to_string();
             handles.push(tokio::spawn(async move {
                 tokio::select! {
                     _ = cancel.cancelled() => None,
+                    _ = race.cancelled() => None,
                     r = async {
                         let _p = sem.acquire().await.ok()?;
                         let (w, d) = try_cfproxy_base_domain(dc, &bd, &ws_path).await;
@@ -1636,6 +1699,9 @@ async fn cfproxy_acquire_ws(
             }));
         }
         for h in handles {
+            if ws.is_some() {
+                race_token.cancel();
+            }
             if let Ok(Some((w, d))) = h.await {
                 if ws.is_none() {
                     ws = Some(w);

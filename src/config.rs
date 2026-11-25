@@ -59,7 +59,9 @@ pub const WS_BRIDGE_CHUNK_SIZE: usize = 64 * 1024;
 pub const POOLED_FRAME_CAP: usize = WS_BRIDGE_CHUNK_SIZE + 32;
 
 // proxy/pool.py::_WsPool
-pub const WS_POOL_REUSE_MAX_AGE: f64 = 120.0;
+// v1.0.5: 120 -> 60 — Cloudflare рвёт простаивающие WS примерно на 100s,
+// «тёплые» соединения старше уже почти наверняка мертвы.
+pub const WS_POOL_REUSE_MAX_AGE: f64 = 60.0;
 pub const WS_POOL_CHECK_INTERVAL: f64 = 5.0;
 pub const WS_POOL_REFILL_BACKOFF_INITIAL: f64 = 1.0;
 pub const WS_POOL_REFILL_BACKOFF_MAX: f64 = 3600.0;
@@ -68,7 +70,8 @@ pub const WS_POOL_FRONTING_TIMEOUT: f64 = 7.0;
 pub const FRONTING_SNI: &str = "sprinthost.ru";
 
 // proxy/pool.py::_CfWorkerPool
-pub const CF_WORKER_POOL_MAX_AGE: f64 = 100.0;
+// v1.0.5: 100 -> 60 — держимся ниже idle-лимита Cloudflare (~100s).
+pub const CF_WORKER_POOL_MAX_AGE: f64 = 60.0;
 pub const CF_WORKER_PER_DC_LIMIT: usize = 1;
 // v1.0.3 (порт Flowseal #1517): backoff неудачных refill, проактивная ротация
 // стейл-соединений и cooldown домена при rate-limit — по образцу WsPool выше.
@@ -91,9 +94,15 @@ pub const CFPROXY_ACTIVE_FILE_NAME: &str = "cfproxy-active-domain.txt";
 pub const CFPROXY_REFRESH_INTERVAL: Duration = Duration::from_secs(3600);
 pub const CFPROXY_MIN_VALID_DOMAINS: usize = 3;
 pub const CFPROXY_DIAL_PHASE_TIMEOUT: Duration = Duration::from_secs(4);
-pub const CFPROXY_FALLBACK_PARALLEL: usize = 2;
+// v1.0.5: 2 -> 4 — с двумя попытками раунд перебора доменов на мобильном
+// тянется 5s * (мёртвые/2); четыре заметно сокращают поиск живого.
+pub const CFPROXY_FALLBACK_PARALLEL: usize = 4;
 pub const CFPROXY_429_COOLDOWN: Duration = Duration::from_secs(45);
 pub const CFPROXY_429_MAX_COOLDOWN: Duration = Duration::from_secs(300);
+// v1.0.5: короткий отдых CF-домена после ТАЙМАУТА (только timeout; reset/refused
+// падают мгновенно и не челимся). Без него мёртвый домен пробовался заново
+// на каждом новом соединении — 5s штраф каждый раз.
+pub const CFPROXY_FAIL_COOLDOWN: Duration = Duration::from_secs(60);
 pub const CFPROXY_GLOBAL_PARALLEL: usize = 4;
 
 pub static RECV_BUF: AtomicI32 = AtomicI32::new(DEFAULT_RECV_BUF as i32);
@@ -144,6 +153,10 @@ pub static FAKE_TLS_DOMAIN: Lazy<RwLock<String>> =
     Lazy::new(|| RwLock::new(String::new()));
 
 pub static CFPROXY_429: Lazy<RwLock<HashMap<String, Cfproxy429State>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
+// v1.0.5: домены на коротком отдыхе после таймаута (см. CFPROXY_FAIL_COOLDOWN).
+pub static CFPROXY_FAIL: Lazy<RwLock<HashMap<String, Instant>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
 pub const CFPROXY_DOMAINS_URL: &str =

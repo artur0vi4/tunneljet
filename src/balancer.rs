@@ -54,6 +54,28 @@ impl Balancer {
         true
     }
 
+    // v1.0.5: sticky-домен не ответил (таймаут) — сменить «первый» домен DC
+    // на другой случайный, иначе серийная попытка повторяла промах при
+    // каждом новом соединении (5s штрафа до параллельного раунда).
+    pub fn demote_domain_for_dc(&mut self, dc_id: i32, failed_domain: &str) {
+        if self.dc_to_domain.get(&dc_id).map(|s| s.as_str()) != Some(failed_domain) {
+            return;
+        }
+        let others: Vec<String> = self
+            .domains
+            .iter()
+            .filter(|d| d.as_str() != failed_domain)
+            .cloned()
+            .collect();
+        if others.is_empty() {
+            return;
+        }
+        let mut rng = rand::thread_rng();
+        if let Some(pick) = others.choose(&mut rng) {
+            self.dc_to_domain.insert(dc_id, pick.clone());
+        }
+    }
+
     pub fn get_domains_for_dc(&self, dc_id: i32) -> Vec<String> {
         let mut result = Vec::new();
         let current_domain = self.dc_to_domain.get(&dc_id).cloned();

@@ -90,6 +90,8 @@ pub fn merge_cfproxy_domains(lists: &[Vec<String>]) -> Vec<String> {
 
 pub fn clear_cfproxy_429_cooldowns() {
     CFPROXY_429.write().clear();
+    // v1.0.5: при перезагрузке конфига сбрасываем и fail-кулдауны.
+    CFPROXY_FAIL.write().clear();
 }
 
 pub fn clear_cfproxy_429_cooldown(domain: &str) {
@@ -192,6 +194,54 @@ pub fn cfproxy_429_cooldown_remaining(domain: &str) -> Duration {
     let now = Instant::now();
     if until <= now {
         CFPROXY_429.write().remove(&d);
+        return Duration::ZERO;
+    }
+    until - now
+}
+
+// ---------------------------------------------------------------------------
+// v1.0.5: fail cooldown — короткий отдых домена после ТАЙМАУТА.
+// Аналог report_failure у CfWorkerPool (WS_ERROR timeout/io -> 60s), только
+// для cfproxy-пути, где раньше челились лишь 429. Из-за этого мёртвый домен
+// пробовался при каждом новом соединении и каждый раз съедал полные 5s —
+// телеграм в это время «ничего не подгружает».
+// ---------------------------------------------------------------------------
+
+pub fn mark_cfproxy_fail_cooldown(domain: &str) {
+    let d = normalize_cf_domain(domain);
+    if d.is_empty() {
+        return;
+    }
+    CFPROXY_FAIL
+        .write()
+        .insert(d.clone(), Instant::now() + CFPROXY_FAIL_COOLDOWN);
+    ldebug!(
+        " CF cooldown {}: {:.0}s after timeout",
+        d,
+        CFPROXY_FAIL_COOLDOWN.as_secs_f64()
+    );
+}
+
+pub fn clear_cfproxy_fail_cooldown(domain: &str) {
+    let d = normalize_cf_domain(domain);
+    if d.is_empty() {
+        return;
+    }
+    CFPROXY_FAIL.write().remove(&d);
+}
+
+pub fn cfproxy_fail_cooldown_remaining(domain: &str) -> Duration {
+    let d = normalize_cf_domain(domain);
+    if d.is_empty() {
+        return Duration::ZERO;
+    }
+    let until = match CFPROXY_FAIL.read().get(&d) {
+        Some(u) => *u,
+        None => return Duration::ZERO,
+    };
+    let now = Instant::now();
+    if until <= now {
+        CFPROXY_FAIL.write().remove(&d);
         return Duration::ZERO;
     }
     until - now
